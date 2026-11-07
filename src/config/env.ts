@@ -15,6 +15,10 @@ const envSchema = z.object({
     .pipe(z.array(z.url())),
   DATABASE_URL: databaseUrl.optional(),
   DIRECT_URL: databaseUrl.optional(),
+  FONNTE_TOKEN: z.string().trim().min(1).optional(),
+  SUPABASE_URL: z.url().optional(),
+  SUPABASE_PUBLISHABLE_KEY: z.string().startsWith('sb_publishable_').optional(),
+  SUPABASE_SECRET_KEY: z.string().startsWith('sb_secret_').optional(),
 }).refine((value) => value.NODE_ENV !== 'production' || Boolean(value.DATABASE_URL), {
   path: ['DATABASE_URL'],
   message: 'DATABASE_URL is required in production',

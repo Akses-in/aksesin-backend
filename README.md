@@ -57,6 +57,16 @@ ke SQL migrasi sebelum diterapkan. Tambahkan policy hanya sesuai akses yang dibu
 Koneksi Prisma memakai role database dan tidak otomatis mewakili pengguna Supabase Auth;
 endpoint data berikutnya tetap perlu autentikasi dan otorisasi.
 
+## OTP WhatsApp lewat Fonnte
+
+Express mengirim kode langsung melalui Fonnte. OTP berlaku lima menit dan hanya bisa dipakai sekali. Backend menyimpan hash kode serta membatasi pengiriman ulang dan percobaan verifikasi.
+
+1. Hubungkan perangkat WhatsApp di Fonnte, lalu simpan tokennya sebagai `FONNTE_TOKEN` di `aksesin-backend/.env`.
+2. Isi `SUPABASE_URL` dan `SUPABASE_PUBLISHABLE_KEY` dengan nilai proyek yang sama dengan frontend. Di **Supabase → Project Settings → API Keys**, buat secret key untuk backend dan simpan sebagai `SUPABASE_SECRET_KEY`. Express memakai key ini untuk membuat akun setelah OTP benar.
+3. Pastikan migrasi `direct_whatsapp_otp` sudah diterapkan, lalu jalankan ulang backend dengan `npm run dev`.
+
+Supabase menyimpan password dan sesi pengguna. Akun WhatsApp memakai identitas email internal yang dibuat backend agar bisa mendapat sesi Supabase dengan provider Email yang sudah tersedia. Pengguna masuk dengan nomor WhatsApp dan password. Pengiriman langsung ini tidak membutuhkan Twilio, Phone provider, atau Send SMS Hook.
+
 ## Endpoint awal
 
 | Method | Path | Kegunaan |

@@ -2,8 +2,11 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { env } from '../config/env.js';
 import { getPrisma } from '../lib/prisma.js';
+import { whatsappRouter } from './whatsapp.js';
 
 export const router = Router();
+
+router.use('/api/auth/whatsapp', whatsappRouter);
 
 router.get('/', (_req, res) => {
   res.json({ name: 'aksesin-backend', status: 'ok' });
