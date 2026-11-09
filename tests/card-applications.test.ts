@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import express from 'express';
+import request from 'supertest';
+import { createCardApplicationsRouter } from '../src/routes/card-applications.js';
 import {
   CARD_STATUS_METADATA,
   CardDomainError,
@@ -19,7 +22,7 @@ const validDocument = {
   documentType: 'surat_keterangan' as const,
   fileName: 'surat-keterangan-disabilitas.pdf',
   mimeType: 'application/pdf' as const,
-  fileSize: 245_000,
+  fileSize: Buffer.byteLength('PDF-1.4-mock-supporting-document'),
   contentBase64: Buffer.from('PDF-1.4-mock-supporting-document').toString('base64'),
 };
 
@@ -323,3 +326,73 @@ test('PBI-18: perubahan status memicu notifikasi berurutan, mencegah duplikasi (
   assert.equal(remainingUpdated, 4);
 });
 
+
+test('menerima tiga dokumen campuran dan menolak dokumen keempat', async () => {
+  const { document, ...application } = validApplicationInput;
+  const image = Buffer.from('mock-image');
+  const png = {
+    ...document,
+    fileName: 'bukti.png',
+    mimeType: 'image/png',
+    fileSize: image.length,
+    contentBase64: image.toString('base64'),
+  };
+  const documents = [document, png, { ...document, fileName: 'lampiran.pdf' }];
+
+  const input = createCardApplicationSchema.parse({ ...application, documents });
+  const store = createInMemoryCardStore();
+  const created = await store.create(USER_A, input);
+  assert.deepEqual(
+    created.application.documents.map((item) => item.fileName),
+    documents.map((item) => item.fileName),
+  );
+  assert.equal(createCardApplicationSchema.safeParse({
+    ...application,
+    documents: [...documents, document],
+  }).success, false);
+  assert.equal(updateCardApplicationSchema.safeParse({
+    consentGiven: true,
+    documents: [...documents, document],
+  }).success, false);
+  assert.equal(createCardApplicationSchema.safeParse({
+    ...application,
+    documents: [{ ...document, fileSize: document.fileSize + 1 }],
+  }).success, false);
+});
+
+
+test('pratinjau dokumen hanya dapat dibuka pemilik pengajuan', async () => {
+  const store = createInMemoryCardStore();
+  const input = createCardApplicationSchema.parse(validApplicationInput);
+  const { application } = await store.create(USER_A, input);
+  const documentId = application.documents[0]!.id;
+  const path = `/card-applications/${application.id}/documents/${documentId}`;
+
+  const app = express();
+  app.use(createCardApplicationsRouter({
+    store,
+    authResolver: async (req) => {
+      const id = req.get('Authorization');
+      return id ? { id, role: 'user' } : null;
+    },
+  }));
+
+  await request(app).get(path).expect(401);
+  await request(app).get(path).set('Authorization', USER_B).expect(404);
+  const response = await request(app).get(path).set('Authorization', USER_A)
+    .buffer(true)
+    .parse((res, done) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (chunk: Buffer) => chunks.push(chunk));
+      res.on('end', () => done(null, Buffer.concat(chunks)));
+      res.on('error', done);
+    })
+    .expect('Content-Type', 'application/pdf')
+    .expect('Content-Disposition', 'inline')
+    .expect('Cache-Control', 'private, no-store')
+    .expect(200);
+  assert.deepEqual(response.body, Buffer.from(validDocument.contentBase64, 'base64'));
+
+  await store.cancel(USER_A, application.id);
+  await request(app).get(path).set('Authorization', USER_A).expect(404);
+});

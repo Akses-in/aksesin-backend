@@ -6,7 +6,6 @@ import {
   CardDomainError,
   type CardApplicationStore,
   createCardApplicationSchema,
-  createInMemoryCardStore,
   createPrismaCardStore,
   statusTransitionSchema,
   updateCardApplicationSchema,
@@ -69,15 +68,17 @@ export function createCardApplicationsRouter(options?: {
   authResolver?: AuthResolver;
 }): Router {
   const router = Router();
-  const fallbackMemoryStore = createInMemoryCardStore();
   const getStore = (): CardApplicationStore => {
     if (options?.store) return options.store;
-    return env.DATABASE_URL ? createPrismaCardStore() : fallbackMemoryStore;
+    if (!env.DATABASE_URL) {
+      throw new CardDomainError(503, 'DATABASE_UNAVAILABLE', 'Database pengajuan belum tersedia.');
+    }
+    return createPrismaCardStore();
   };
   const resolveAuth: AuthResolver = options?.authResolver ?? defaultSupabaseAuthResolver;
 
-  // Support up to 5MB document payload (base64 encoded ~6.8MB) on card application routes
-  router.use(express.json({ limit: '8mb' }));
+  // Three 5 MiB files expand to slightly over 20 MiB in base64.
+  router.use(express.json({ limit: '21mb' }));
 
   router.use((_req, res, next) => {
     res.set('Cache-Control', 'no-store');
@@ -148,6 +149,30 @@ export function createCardApplicationsRouter(options?: {
       }
 
       res.json({ data: application });
+    } catch (error) {
+      if (!sendDomainError(res, error)) next(error);
+    }
+  });
+
+  router.get('/card-applications/:id/documents/:documentId', async (req, res, next) => {
+    try {
+      const actor = await requireAuth(req, res);
+      if (!actor) return;
+
+      const { id, documentId } = uuidParam.extend({ documentId: z.uuid() }).parse(req.params);
+      const document = await getStore().getDocument(actor.id, id, documentId);
+      if (!document) {
+        throw new CardDomainError(404, 'DOCUMENT_NOT_FOUND', 'Dokumen tidak tersedia.');
+      }
+
+      res.set({
+        'Content-Type': document.mimeType,
+        'Content-Disposition': 'inline',
+        'Cache-Control': 'private, no-store',
+        'X-Content-Type-Options': 'nosniff',
+        'Content-Security-Policy': "default-src 'none'; frame-ancestors 'none'",
+      });
+      res.send(Buffer.from(document.content));
     } catch (error) {
       if (!sendDomainError(res, error)) next(error);
     }

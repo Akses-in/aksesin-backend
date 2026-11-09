@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import type { Prisma } from '../generated/prisma/client.js';
 import { z } from 'zod';
 import { getPrisma } from '../lib/prisma.js';
 
@@ -177,8 +178,15 @@ export const documentUploadSchema = z.strictObject({
     .trim()
     .min(4, 'Isi dokumen pendukung wajib diunggah.')
     .max(7_500_000, 'Ukuran payload dokumen melebihi batas 5 MB.')
-    .refine((val) => /^[A-Za-z0-9+/=\s]+$/.test(val), 'Format enkoding dokumen tidak valid.'),
-});
+    .refine((value) => Buffer.from(value, 'base64').toString('base64') === value, 'Format enkoding dokumen tidak valid.'),
+}).refine(
+  (document) => Buffer.from(document.contentBase64, 'base64').length === document.fileSize,
+  { message: 'Ukuran dokumen tidak sesuai dengan isi berkas.', path: ['fileSize'] },
+);
+
+const documentsSchema = z.array(documentUploadSchema)
+  .min(1, 'Unggah minimal satu dokumen pendukung.')
+  .max(3, 'Unggah maksimal tiga dokumen pendukung.');
 
 export const createCardApplicationSchema = z.strictObject({
   fullName: z
@@ -202,8 +210,12 @@ export const createCardApplicationSchema = z.strictObject({
   consentGiven: z.boolean().refine((val) => val === true, {
     message: 'Anda wajib menyetujui pemrosesan data dan dokumen pendukung.',
   }),
-  document: documentUploadSchema,
-});
+  document: documentUploadSchema.optional(),
+  documents: documentsSchema.optional(),
+}).refine(
+  (input) => Boolean(input.document) !== Boolean(input.documents),
+  { message: 'Unggah satu hingga tiga dokumen pendukung.', path: ['documents'] },
+);
 
 export const updateCardApplicationSchema = z
   .strictObject({
@@ -232,6 +244,12 @@ export const updateCardApplicationSchema = z
       message: 'Persetujuan penggunaan data tidak boleh dicabut selama pengajuan aktif.',
     }),
     document: documentUploadSchema.optional(),
+    documents: documentsSchema.optional(),
+    documentType: z.enum(DOCUMENT_TYPES).optional(),
+  })
+  .refine((input) => !(input.document && input.documents), {
+    message: 'Kirim dokumen dalam satu format payload.',
+    path: ['documents'],
   })
   .refine(
     (data) =>
@@ -239,7 +257,9 @@ export const updateCardApplicationSchema = z
       data.disabilityCategory !== undefined ||
       data.needs !== undefined ||
       data.notes !== undefined ||
-      data.document !== undefined,
+      data.document !== undefined ||
+      data.documents !== undefined ||
+      data.documentType !== undefined,
     { message: 'Minimal satu data atau dokumen harus diperbarui.' },
   );
 
@@ -303,6 +323,7 @@ export interface CardApplicationRecord {
   verifiedAt: string | null;
   cancelledAt: string | null;
   evidence: CardEvidenceRecord | null;
+  documents: CardEvidenceRecord[];
   history: CardVerificationRecord[];
 }
 
@@ -378,6 +399,11 @@ export function enrichCardRecord(
 export interface CardApplicationStore {
   listByUser(userId: string): Promise<CardApplicationRecord[]>;
   getById(cardId: string): Promise<CardApplicationRecord | null>;
+  getDocument(
+    userId: string,
+    cardId: string,
+    documentId: string,
+  ): Promise<{ mimeType: AllowedDocumentMime; content: Uint8Array } | null>;
   create(
     userId: string,
     input: z.infer<typeof createCardApplicationSchema>,
@@ -409,8 +435,52 @@ export interface CardApplicationStore {
  * In-memory store implementation for unit/integration tests and local fallback,
  * enforcing identical constraints, ownership, and idempotency rules as PostgreSQL.
  */
+function buildEvidenceRecord(
+  document: z.infer<typeof documentUploadSchema>,
+  userId: string,
+  cardId: string,
+  uploadedAt: string,
+): CardEvidenceRecord {
+  const id = randomUUID();
+  return {
+    id,
+    userId,
+    cardId,
+    documentType: document.documentType,
+    fileName: document.fileName,
+    mimeType: document.mimeType,
+    fileSize: document.fileSize,
+    filePath: `private://card-evidence/${userId}/${cardId}/${id}`,
+    uploadedAt,
+  };
+}
+
+async function insertEvidence(
+  tx: Prisma.TransactionClient,
+  userId: string,
+  cardId: string,
+  documents: z.infer<typeof documentUploadSchema>[],
+) {
+  for (const document of documents) {
+    const evidence = buildEvidenceRecord(document, userId, cardId, new Date().toISOString());
+    await tx.$executeRaw`
+      WITH evidence AS (
+        INSERT INTO public.card_evidence (
+          id, card_id, user_id, document_type, file_name, mime_type, file_size, file_path
+        ) VALUES (
+          ${evidence.id}::uuid, ${cardId}::uuid, ${userId}::uuid, ${document.documentType},
+          ${document.fileName}, ${document.mimeType}, ${document.fileSize}, ${evidence.filePath}
+        )
+        RETURNING id
+      )
+      INSERT INTO aksesin_private.card_evidence_contents (evidence_id, content)
+      SELECT id, ${Buffer.from(document.contentBase64, 'base64')}::bytea FROM evidence`;
+  }
+}
+
 export function createInMemoryCardStore(): CardApplicationStore {
   const cards = new Map<string, Omit<CardApplicationRecord, 'statusLabel' | 'canEdit' | 'canCancel'>>();
+  const documentContents = new Map<string, Uint8Array>();
   const notifications = new Map<string, CardNotificationRecord>();
   const dedupIndex = new Map<string, CardNotificationRecord>();
 
@@ -459,6 +529,14 @@ export function createInMemoryCardStore(): CardApplicationStore {
       return card ? enrichCardRecord(card) : null;
     },
 
+    async getDocument(userId, cardId, documentId) {
+      const card = cards.get(cardId);
+      if (card?.userId !== userId) return null;
+      const document = card.documents.find((item) => item.id === documentId);
+      const content = documentContents.get(documentId);
+      return document && content ? { mimeType: document.mimeType, content } : null;
+    },
+
     async create(userId, input) {
       const activeStatuses: CardStatus[] = ['pending', 'diproses', 'perbaikan', 'verified'];
       const hasActive = Array.from(cards.values()).some(
@@ -474,20 +552,12 @@ export function createInMemoryCardStore(): CardApplicationStore {
 
       const now = new Date().toISOString();
       const cardId = randomUUID();
-      const evidenceId = randomUUID();
-      const digest = createHash('sha256').update(input.document.contentBase64).digest('hex').slice(0, 16);
-
-      const evidence: CardEvidenceRecord = {
-        id: evidenceId,
-        cardId,
-        userId,
-        documentType: input.document.documentType,
-        fileName: input.document.fileName,
-        mimeType: input.document.mimeType,
-        fileSize: input.document.fileSize,
-        filePath: `private://card-evidence/${userId}/${cardId}/${digest}-${input.document.fileName}`,
-        uploadedAt: now,
-      };
+      const documents = (input.documents ?? (input.document ? [input.document] : []))
+        .map((document) => {
+          const evidence = buildEvidenceRecord(document, userId, cardId, now);
+          documentContents.set(evidence.id, Buffer.from(document.contentBase64, 'base64'));
+          return evidence;
+        });
 
       const historyEntry: CardVerificationRecord = {
         id: randomUUID(),
@@ -514,7 +584,8 @@ export function createInMemoryCardStore(): CardApplicationStore {
         updatedAt: now,
         verifiedAt: null,
         cancelledAt: null,
-        evidence,
+        evidence: documents[0] ?? null,
+        documents,
         history: [historyEntry],
       };
 
@@ -549,19 +620,17 @@ export function createInMemoryCardStore(): CardApplicationStore {
       if (input.needs !== undefined) card.needs = input.needs;
       if (input.notes !== undefined) card.notes = input.notes;
 
-      if (input.document) {
-        const digest = createHash('sha256').update(input.document.contentBase64).digest('hex').slice(0, 16);
-        card.evidence = {
-          id: randomUUID(),
-          cardId,
-          userId,
-          documentType: input.document.documentType,
-          fileName: input.document.fileName,
-          mimeType: input.document.mimeType,
-          fileSize: input.document.fileSize,
-          filePath: `private://card-evidence/${userId}/${cardId}/${digest}-${input.document.fileName}`,
-          uploadedAt: now,
-        };
+      const documents = input.documents ?? (input.document ? [input.document] : []);
+      if (documents.length > 0) {
+        for (const document of card.documents) documentContents.delete(document.id);
+        card.documents = documents.map((document) => {
+          const evidence = buildEvidenceRecord(document, userId, cardId, now);
+          documentContents.set(evidence.id, Buffer.from(document.contentBase64, 'base64'));
+          return evidence;
+        });
+        card.evidence = card.documents[0] ?? null;
+      } else if (input.documentType) {
+        for (const document of card.documents) document.documentType = input.documentType;
       }
 
       card.status = nextStatus;
@@ -612,7 +681,9 @@ export function createInMemoryCardStore(): CardApplicationStore {
       card.status = 'dibatalkan';
       card.cancelledAt = now;
       card.updatedAt = now;
-      card.evidence = null; // Withdraw uploaded supporting document upon cancellation
+      card.evidence = null;
+      for (const document of card.documents) documentContents.delete(document.id);
+      card.documents = [];
 
       card.history.unshift({
         id: randomUUID(),
@@ -819,7 +890,7 @@ export async function ensureCardTablesExist(): Promise<void> {
       `alter table public.card_verifications enable row level security`,
       `alter table public.card_notifications enable row level security`,
       `grant select, insert, update on public.digital_cards to authenticated`,
-      `grant select, insert, delete on public.card_evidence to authenticated`,
+      `grant select on public.card_evidence to authenticated`,
       `grant select on public.card_verifications to authenticated`,
       `grant select, insert, update on public.card_notifications to authenticated`,
       `drop policy if exists "Read own digital cards" on public.digital_cards`,
@@ -831,9 +902,7 @@ export async function ensureCardTablesExist(): Promise<void> {
       `drop policy if exists "Read own card evidence" on public.card_evidence`,
       `create policy "Read own card evidence" on public.card_evidence for select to authenticated using ((select auth.uid()) = user_id)`,
       `drop policy if exists "Insert own card evidence" on public.card_evidence`,
-      `create policy "Insert own card evidence" on public.card_evidence for insert to authenticated with check ((select auth.uid()) = user_id)`,
       `drop policy if exists "Delete own card evidence" on public.card_evidence`,
-      `create policy "Delete own card evidence" on public.card_evidence for delete to authenticated using ((select auth.uid()) = user_id)`,
       `drop policy if exists "Read own card verification history" on public.card_verifications`,
       `create policy "Read own card verification history" on public.card_verifications for select to authenticated using (exists (select 1 from public.digital_cards c where c.id = card_verifications.card_id and c.user_id = (select auth.uid())))`,
       `drop policy if exists "Read own card notifications" on public.card_notifications`,
@@ -932,18 +1001,29 @@ export function createPrismaCardStore(): CardApplicationStore {
 
   async function hydrateCard(row: DbCardRow): Promise<CardApplicationRecord> {
     const db = getPrisma();
-    const [evidenceRow] = await db.$queryRaw<DbEvidenceRow[]>`
+    const evidenceRows = await db.$queryRaw<DbEvidenceRow[]>`
       SELECT id, card_id, user_id, document_type, file_name, mime_type, file_size, file_path, uploaded_at
       FROM public.card_evidence
       WHERE card_id = ${row.id}::uuid
-      ORDER BY uploaded_at DESC
-      LIMIT 1`;
+      ORDER BY uploaded_at DESC, id`;
 
     const historyRows = await db.$queryRaw<DbVerificationRow[]>`
       SELECT id, card_id, actor_id, previous_status, new_status, reason, created_at
       FROM public.card_verifications
       WHERE card_id = ${row.id}::uuid
       ORDER BY created_at DESC`;
+
+    const documents = evidenceRows.map((evidenceRow) => ({
+      id: evidenceRow.id,
+      cardId: evidenceRow.card_id,
+      userId: evidenceRow.user_id,
+      documentType: evidenceRow.document_type,
+      fileName: evidenceRow.file_name,
+      mimeType: evidenceRow.mime_type,
+      fileSize: evidenceRow.file_size,
+      filePath: evidenceRow.file_path,
+      uploadedAt: evidenceRow.uploaded_at.toISOString(),
+    }));
 
     return enrichCardRecord({
       id: row.id,
@@ -960,19 +1040,8 @@ export function createPrismaCardStore(): CardApplicationStore {
       updatedAt: row.updated_at.toISOString(),
       verifiedAt: row.verified_at ? row.verified_at.toISOString() : null,
       cancelledAt: row.cancelled_at ? row.cancelled_at.toISOString() : null,
-      evidence: evidenceRow
-        ? {
-          id: evidenceRow.id,
-          cardId: evidenceRow.card_id,
-          userId: evidenceRow.user_id,
-          documentType: evidenceRow.document_type,
-          fileName: evidenceRow.file_name,
-          mimeType: evidenceRow.mime_type,
-          fileSize: evidenceRow.file_size,
-          filePath: evidenceRow.file_path,
-          uploadedAt: evidenceRow.uploaded_at.toISOString(),
-        }
-        : null,
+      evidence: documents[0] ?? null,
+      documents,
       history: historyRows.map((h) => ({
         id: h.id,
         cardId: h.card_id,
@@ -1002,6 +1071,20 @@ export function createPrismaCardStore(): CardApplicationStore {
       const [row] = await db.$queryRaw<DbCardRow[]>`
         SELECT * FROM public.digital_cards WHERE id = ${cardId}::uuid`;
       return row ? hydrateCard(row) : null;
+    },
+
+    async getDocument(userId, cardId, documentId) {
+      const [document] = await getPrisma().$queryRaw<{ mimeType: AllowedDocumentMime; content: Uint8Array }[]>`
+        SELECT evidence.mime_type AS "mimeType", contents.content
+        FROM public.card_evidence AS evidence
+        JOIN aksesin_private.card_evidence_contents AS contents ON contents.evidence_id = evidence.id
+        JOIN public.digital_cards AS card ON card.id = evidence.card_id
+        WHERE evidence.id = ${documentId}::uuid
+          AND evidence.card_id = ${cardId}::uuid
+          AND evidence.user_id = ${userId}::uuid
+          AND card.user_id = ${userId}::uuid
+          AND card.status <> 'dibatalkan'`;
+      return document ?? null;
     },
 
     async create(userId, input) {
@@ -1038,21 +1121,7 @@ export function createPrismaCardStore(): CardApplicationStore {
           throw new CardDomainError(500, 'CREATE_FAILED', 'Gagal menyimpan pengajuan kartu.');
         }
 
-        const digest = createHash('sha256').update(input.document.contentBase64).digest('hex').slice(0, 16);
-        const filePath = `private://card-evidence/${userId}/${cardRow.id}/${digest}-${input.document.fileName}`;
-
-        await tx.$executeRaw`
-          INSERT INTO public.card_evidence (
-            card_id, user_id, document_type, file_name, mime_type, file_size, file_path
-          ) VALUES (
-            ${cardRow.id}::uuid,
-            ${userId}::uuid,
-            ${input.document.documentType},
-            ${input.document.fileName},
-            ${input.document.mimeType},
-            ${input.document.fileSize},
-            ${filePath}
-          )`;
+        await insertEvidence(tx, userId, cardRow.id, input.documents ?? (input.document ? [input.document] : []));
 
         await tx.$executeRaw`
           INSERT INTO public.card_verifications (
@@ -1139,22 +1208,14 @@ export function createPrismaCardStore(): CardApplicationStore {
           throw new CardDomainError(500, 'UPDATE_FAILED', 'Gagal memperbarui pengajuan kartu.');
         }
 
-        if (input.document) {
-          const digest = createHash('sha256').update(input.document.contentBase64).digest('hex').slice(0, 16);
-          const filePath = `private://card-evidence/${userId}/${cardId}/${digest}-${input.document.fileName}`;
+        const documents = input.documents ?? (input.document ? [input.document] : []);
+        if (documents.length > 0) {
           await tx.$executeRaw`DELETE FROM public.card_evidence WHERE card_id = ${cardId}::uuid`;
+          await insertEvidence(tx, userId, cardId, documents);
+        } else if (input.documentType) {
           await tx.$executeRaw`
-            INSERT INTO public.card_evidence (
-              card_id, user_id, document_type, file_name, mime_type, file_size, file_path
-            ) VALUES (
-              ${cardId}::uuid,
-              ${userId}::uuid,
-              ${input.document.documentType},
-              ${input.document.fileName},
-              ${input.document.mimeType},
-              ${input.document.fileSize},
-              ${filePath}
-            )`;
+            UPDATE public.card_evidence SET document_type = ${input.documentType}
+            WHERE card_id = ${cardId}::uuid AND user_id = ${userId}::uuid`;
         }
 
         let notifRow: DbNotificationRow | null = null;
