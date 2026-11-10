@@ -43,7 +43,7 @@ async function defaultSupabaseAuthResolver(req: Request): Promise<AuthenticatedA
     return null;
   }
 
-  const isAdmin = user.app_metadata?.role === 'admin' || user.user_metadata?.role === 'admin';
+  const isAdmin = user.app_metadata?.role === 'admin';
   return {
     id: user.id,
     role: isAdmin ? 'admin' : 'user',
