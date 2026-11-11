@@ -2,6 +2,7 @@ import { app } from './app.js';
 import { env } from './config/env.js';
 import { disconnectDatabase } from './lib/prisma.js';
 import { ensureCardTablesExist } from './services/card-application.js';
+import { ensureActivityTablesExist } from './services/user-activity.js';
 
 const server = app.listen(env.PORT, env.HOST, () => {
   console.log(`API listening on http://${env.HOST}:${env.PORT}`);
@@ -10,6 +11,9 @@ const server = app.listen(env.PORT, env.HOST, () => {
   } else {
     void ensureCardTablesExist().catch((err) => {
       console.error('Gagal menginisialisasi skema kartu aksesibilitas:', err instanceof Error ? err.message : err);
+    });
+    void ensureActivityTablesExist().catch((err) => {
+      console.error('Gagal menginisialisasi skema riwayat aktivitas:', err instanceof Error ? err.message : err);
     });
   }
 });
