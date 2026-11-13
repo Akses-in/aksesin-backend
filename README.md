@@ -74,7 +74,7 @@ lalu peta dan halaman admin membaca dari database, bukan langsung dari Overpass.
 
 1. Terapkan migration `20261113100000_osm_place_import` lalu `20261113100100_admin_notifications`.
 2. Opsional: atur `OVERPASS_URLS` (daftar HTTPS dipisah koma, dicoba berurutan). Default memakai
-   `overpass-api.de` lalu `overpass.private.coffee`.
+   `overpass-api.de` lalu `overpass.kumi.systems`.
 
 - Impor berjalan di latar belakang dengan status `queued -> running -> succeeded | failed`. Hanya satu job boleh aktif.
 - Impor ulang memperbarui tempat berdasarkan `(osm_type, osm_id)` dan hanya menghitung "diperbarui" bila isinya berubah.
