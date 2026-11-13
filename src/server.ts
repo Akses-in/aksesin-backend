@@ -2,6 +2,7 @@ import { app } from './app.js';
 import { env } from './config/env.js';
 import { disconnectDatabase } from './lib/prisma.js';
 import { ensureCardTablesExist } from './services/card-application.js';
+import { failInterruptedImportJobs } from './services/place-import.js';
 import { ensureActivityTablesExist } from './services/user-activity.js';
 
 const server = app.listen(env.PORT, env.HOST, () => {
@@ -14,6 +15,12 @@ const server = app.listen(env.PORT, env.HOST, () => {
     });
     void ensureActivityTablesExist().catch((err) => {
       console.error('Gagal menginisialisasi skema riwayat aktivitas:', err instanceof Error ? err.message : err);
+    });
+    // Job yang tertinggal saat server mati di tengah impor tidak akan pernah selesai.
+    void failInterruptedImportJobs().then((count) => {
+      if (count) console.log(`${count} job impor OSM yang terhenti ditandai gagal.`);
+    }).catch((err) => {
+      console.error('Gagal memeriksa job impor OSM yang terhenti:', err instanceof Error ? err.name : 'UnknownError');
     });
   }
 });

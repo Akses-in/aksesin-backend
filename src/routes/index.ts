@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { env } from '../config/env.js';
 import { getPrisma } from '../lib/prisma.js';
+import { adminPlacesRouter } from './admin-places.js';
 import { cardApplicationsRouter } from './card-applications.js';
 import { userActivitiesRouter } from './user-activities.js';
 import { whatsappRouter } from './whatsapp.js';
@@ -11,6 +12,7 @@ export const router = Router();
 router.use('/api/auth/whatsapp', whatsappRouter);
 router.use('/api', cardApplicationsRouter);
 router.use('/api', userActivitiesRouter);
+router.use('/api', adminPlacesRouter);
 
 router.get('/', (_req, res) => {
   res.json({ name: 'aksesin-backend', status: 'ok' });
