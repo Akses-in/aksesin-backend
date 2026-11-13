@@ -20,7 +20,11 @@ const envSchema = z.object({
   SUPABASE_PUBLISHABLE_KEY: z.string().startsWith('sb_publishable_').optional(),
   SUPABASE_SECRET_KEY: z.string().startsWith('sb_secret_').optional(),
   OVERPASS_URLS: z.string()
-    .default('https://overpass-api.de/api/interpreter,https://overpass.kumi.systems/api/interpreter')
+    .default([
+      'https://overpass-api.de/api/interpreter',
+      'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
+      'https://overpass.kumi.systems/api/interpreter',
+    ].join(','))
     .transform((value) => value.split(',').map((url) => url.trim()).filter(Boolean))
     .pipe(z.array(z.url({ protocol: /^https$/ })).min(1).max(5)),
 }).refine((value) => value.NODE_ENV !== 'production' || Boolean(value.DATABASE_URL), {

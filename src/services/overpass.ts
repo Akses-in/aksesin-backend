@@ -2,7 +2,10 @@ import { z } from 'zod';
 import { env } from '../config/env.js';
 
 export const OVERPASS_USER_AGENT = 'AksesIn/1.0 (proyek mahasiswa Telkom University)';
-export const OVERPASS_TIMEOUT_MS = 90_000;
+// Query seluruh DKI Jakarta (sekitar 10 ribu elemen) butuh sekitar 95 detik di server publik.
+// Batas server dibuat sedikit di bawah batas klien supaya Overpass sempat membalas error yang jelas.
+export const OVERPASS_SERVER_TIMEOUT_SECONDS = 170;
+export const OVERPASS_TIMEOUT_MS = 180_000;
 const MAX_RESPONSE_CHARS = 100 * 1024 * 1024;
 
 export class OverpassUnavailableError extends Error {
@@ -28,7 +31,7 @@ type FetchLike = (input: string, init: RequestInit) => Promise<Response>;
 
 // `out center meta` memberi titik tengah way/relation serta timestamp edit terakhir.
 // Data pengguna OSM yang ikut terbawa (user, uid) tidak pernah disimpan.
-export function buildOverpassQuery(timeoutSeconds = 80): string {
+export function buildOverpassQuery(timeoutSeconds = OVERPASS_SERVER_TIMEOUT_SECONDS): string {
   return [
     `[out:json][timeout:${timeoutSeconds}];`,
     'area["ISO3166-2"="ID-JK"][admin_level=4]->.jkt;',

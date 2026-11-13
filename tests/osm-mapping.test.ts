@@ -150,6 +150,8 @@ test('PBI-09: query Overpass hanya mengambil wilayah DKI Jakarta dengan titik te
   const query = buildOverpassQuery();
   assert.match(query, /area\["ISO3166-2"="ID-JK"\]\[admin_level=4\]->\.jkt;/);
   assert.match(query, /out center meta;/);
+  // Query seluruh Jakarta butuh sekitar 95 detik, jadi batas lama 80 detik selalu gagal.
+  assert.match(query, /\[timeout:170\]/);
   assert.match(query, /\["name"\]\(area\.jkt\)/);
 });
 
