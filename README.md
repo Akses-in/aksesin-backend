@@ -67,6 +67,43 @@ Express mengirim kode langsung melalui Fonnte. OTP berlaku lima menit dan hanya 
 
 Pengguna masuk dengan nomor WhatsApp terverifikasi dan OTP. Setelah kode benar, backend memakai identitas email akun di Supabase untuk membuat sesi tanpa mengirim email. Akun WhatsApp memakai identitas email internal yang dibuat saat pendaftaran. Pengiriman langsung ini tidak membutuhkan Twilio, Phone provider, atau Send SMS Hook.
 
+## Impor tempat dari OpenStreetMap
+
+Admin menjalankan impor data tempat DKI Jakarta dari Overpass API. Backend menyimpan hasilnya ke tabel `places`,
+lalu peta dan halaman admin membaca dari database, bukan langsung dari Overpass.
+
+1. Terapkan migration `20261113100000_osm_place_import` lalu `20261113100100_admin_notifications`.
+2. Opsional: atur `OVERPASS_URLS` (daftar HTTPS dipisah koma, dicoba berurutan). Default memakai
+   `overpass-api.de` lalu `overpass.kumi.systems`.
+
+- Impor berjalan di latar belakang dengan status `queued -> running -> succeeded | failed`. Hanya satu job boleh aktif.
+- Impor ulang memperbarui tempat berdasarkan `(osm_type, osm_id)` dan hanya menghitung "diperbarui" bila isinya berubah.
+- Data `manual` dan tempat yang sudah diedit admin tidak ditimpa impor. Tempat OSM yang dihapus admin dicatat di
+  `place_import_exclusions` supaya tidak masuk lagi.
+- Bila semua endpoint Overpass gagal, job ditandai `failed` dan tabel `places` tidak berubah. Seluruh penyimpanan
+  satu impor berjalan dalam satu transaksi.
+- Saat server start, job yang tertinggal berstatus `queued`/`running` ditandai gagal.
+- Setiap job yang selesai membuat satu notifikasi admin.
+
+Semua endpoint di bawah memerlukan `Authorization: Bearer <token>` akun dengan `app_metadata.role = "admin"`.
+Tanpa token: 401 `UNAUTHORIZED`. Bukan admin: 403 `FORBIDDEN`.
+
+| Method | Path | Kegunaan |
+| --- | --- | --- |
+| POST | `/api/admin/osm-imports` | Mulai impor (202), 409 bila masih ada job aktif |
+| GET | `/api/admin/osm-imports?page=&pageSize=` | Riwayat impor, terbaru dulu |
+| GET | `/api/admin/osm-imports/:id` | Detail job untuk polling status |
+| GET | `/api/admin/places?q=&status=&source=&page=&pageSize=` | Daftar tempat dan atribut aksesibilitas (`pageSize` maks. 100) |
+| GET | `/api/admin/places/duplicates` | Kandidat duplikat: nama sama dan jarak < 50 m |
+| PATCH | `/api/admin/places/:id` | Ubah nama, kategori, alamat, koordinat, status, atau atribut aksesibilitas |
+| DELETE | `/api/admin/places/:id` | Hapus tempat. Body opsional `{ "reason": "duplicate" \| "invalid" }` |
+| GET | `/api/admin/notifications?unread=true` | Notifikasi hasil impor |
+| PATCH | `/api/admin/notifications/:id/read` | Tandai notifikasi sudah dibaca |
+
+Menghapus tempat ikut menghapus lokasi tersimpan dan kontribusi pengguna untuk tempat itu (`ON DELETE CASCADE`).
+Respons DELETE menyertakan `savedByCount` dan `contributionCount`.
+Data tempat © kontributor OpenStreetMap, lisensi [ODbL](https://www.openstreetmap.org/copyright).
+
 ## Endpoint awal
 
 | Method | Path | Kegunaan |
