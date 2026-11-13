@@ -74,7 +74,8 @@ lalu peta dan halaman admin membaca dari database, bukan langsung dari Overpass.
 
 1. Terapkan migration `20261113100000_osm_place_import` lalu `20261113100100_admin_notifications`.
 2. Opsional: atur `OVERPASS_URLS` (daftar HTTPS dipisah koma, dicoba berurutan). Default memakai
-   `overpass-api.de` lalu `overpass.kumi.systems`.
+   `overpass-api.de`, lalu `maps.mail.ru`, lalu `overpass.kumi.systems`. Server utama sering penuh,
+   sehingga cadangan diperlukan. Satu impor DKI Jakarta (sekitar 10 ribu elemen) butuh sekitar 1,5 sampai 3 menit.
 
 - Impor berjalan di latar belakang dengan status `queued -> running -> succeeded | failed`. Hanya satu job boleh aktif.
 - Impor ulang memperbarui tempat berdasarkan `(osm_type, osm_id)` dan hanya menghitung "diperbarui" bila isinya berubah.
@@ -99,6 +100,12 @@ Tanpa token: 401 `UNAUTHORIZED`. Bukan admin: 403 `FORBIDDEN`.
 | DELETE | `/api/admin/places/:id` | Hapus tempat. Body opsional `{ "reason": "duplicate" \| "invalid" }` |
 | GET | `/api/admin/notifications?unread=true` | Notifikasi hasil impor |
 | PATCH | `/api/admin/notifications/:id/read` | Tandai notifikasi sudah dibaca |
+
+Endpoint publik untuk peta (tanpa login):
+
+| Method | Path | Kegunaan |
+| --- | --- | --- |
+| GET | `/api/places?bbox=minLon,minLat,maxLon,maxLat&status=&limit=` | Tempat di area peta yang terlihat, maks. 500. Tempat yang punya info aksesibilitas didahulukan. `truncated: true` bila hasil dipotong |
 
 Menghapus tempat ikut menghapus lokasi tersimpan dan kontribusi pengguna untuk tempat itu (`ON DELETE CASCADE`).
 Respons DELETE menyertakan `savedByCount` dan `contributionCount`.
