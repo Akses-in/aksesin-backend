@@ -71,6 +71,11 @@ async function issueOtp(phoneNumber: string, key: string, fonnteToken: string, i
   const status = await db.$transaction(async (tx) => {
     if (accountId) await lockPhoneChanges(tx, accountId);
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(190846, 1)`;
+    if (purpose === 'registration') {
+      const [existing] = await tx.$queryRaw<{ id: string }[]>`
+        SELECT id FROM auth.users WHERE phone = ${phoneNumber.slice(1)} AND phone_confirmed_at IS NOT NULL`;
+      if (existing) return 409;
+    }
     await tx.$executeRaw`DELETE FROM aksesin_private.whatsapp_challenges
       WHERE last_sent_at < now() - interval '1 day'`;
     const [previous] = await tx.$queryRaw<ChallengeRow[]>`
@@ -172,7 +177,7 @@ whatsappRouter.post('/verify', async (req, res) => {
 
   const verified = await getPrisma().$transaction(async (tx) => {
     if (!await checkOtp(tx, input, digest, 'registration', null)) return false;
-    // Replace the OTP digest with a one-time proof for the password step.
+    // Replace the OTP digest with a one-time proof for account creation.
     await tx.$executeRaw`UPDATE aksesin_private.whatsapp_challenges
       SET attempts = 5, otp_hash = ${proofDigest}, expires_at = now() + interval '10 minutes'
       WHERE phone = ${input.phone}`;
@@ -183,12 +188,13 @@ whatsappRouter.post('/verify', async (req, res) => {
 });
 
 whatsappRouter.post('/complete', async (req, res) => {
-  const input = challenge.extend({ proof: z.string().regex(/^[a-f0-9]{64}$/), password }).parse(req.body);
+  const input = challenge.extend({ proof: z.string().regex(/^[a-f0-9]{64}$/), password: password.optional() }).parse(req.body);
   const clients = supabaseClients();
   if (!clients || !env.DATABASE_URL) return res.sendStatus(503);
 
   const digest = challengeHash(clients.otpKey, 'registration', input.phone, input.challengeId, input.proof);
   const email = `${randomUUID()}@accounts.aksesin.invalid`;
+  const accountPassword = input.password ?? `Aa1!${randomBytes(32).toString('base64url')}`;
   const status = await getPrisma().$transaction(async (tx) => {
     const [pending] = await tx.$queryRaw<{ full_name: string }[]>`
       SELECT full_name FROM aksesin_private.whatsapp_challenges
@@ -198,7 +204,7 @@ whatsappRouter.post('/complete', async (req, res) => {
 
     const { error } = await clients.admin.auth.admin.createUser({
       email, email_confirm: true, phone: input.phone, phone_confirm: true,
-      password: input.password, user_metadata: { full_name: pending.full_name },
+      password: accountPassword, user_metadata: { full_name: pending.full_name },
       app_metadata: { aksesin_login: 'whatsapp' },
     });
     const duplicate = error?.code === 'phone_exists' || error?.code === 'user_already_exists';
@@ -210,7 +216,7 @@ whatsappRouter.post('/complete', async (req, res) => {
   }, { timeout: 8000 });
   if (status !== 200) return res.sendStatus(status);
 
-  const { data } = await clients.auth.auth.signInWithPassword({ email, password: input.password });
+  const { data } = await clients.auth.auth.signInWithPassword({ email, password: accountPassword });
   if (!data.session) return res.sendStatus(204);
   return res.json({ access_token: data.session.access_token, refresh_token: data.session.refresh_token });
 });
