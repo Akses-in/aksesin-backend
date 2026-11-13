@@ -4,6 +4,7 @@ import { env } from '../config/env.js';
 import { getPrisma } from '../lib/prisma.js';
 import { adminPlacesRouter } from './admin-places.js';
 import { cardApplicationsRouter } from './card-applications.js';
+import { placesRouter } from './places.js';
 import { userActivitiesRouter } from './user-activities.js';
 import { whatsappRouter } from './whatsapp.js';
 
@@ -13,6 +14,7 @@ router.use('/api/auth/whatsapp', whatsappRouter);
 router.use('/api', cardApplicationsRouter);
 router.use('/api', userActivitiesRouter);
 router.use('/api', adminPlacesRouter);
+router.use('/api', placesRouter);
 
 router.get('/', (_req, res) => {
   res.json({ name: 'aksesin-backend', status: 'ok' });
