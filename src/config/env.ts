@@ -19,6 +19,10 @@ const envSchema = z.object({
   SUPABASE_URL: z.url().optional(),
   SUPABASE_PUBLISHABLE_KEY: z.string().startsWith('sb_publishable_').optional(),
   SUPABASE_SECRET_KEY: z.string().startsWith('sb_secret_').optional(),
+  OVERPASS_URLS: z.string()
+    .default('https://overpass-api.de/api/interpreter,https://overpass.kumi.systems/api/interpreter')
+    .transform((value) => value.split(',').map((url) => url.trim()).filter(Boolean))
+    .pipe(z.array(z.url({ protocol: /^https$/ })).min(1).max(5)),
 }).refine((value) => value.NODE_ENV !== 'production' || Boolean(value.DATABASE_URL), {
   path: ['DATABASE_URL'],
   message: 'DATABASE_URL is required in production',
