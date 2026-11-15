@@ -27,6 +27,12 @@ export const publicPlacesQuerySchema = z.strictObject({
 });
 export type PublicPlacesQuery = z.infer<typeof publicPlacesQuerySchema>;
 
+export const publicPlacesSearchQuerySchema = z.strictObject({
+  q: z.string().trim().min(1, 'Kata kunci pencarian tidak boleh kosong.').max(100),
+  limit: z.coerce.number().int().min(1).max(50).default(20),
+});
+export type PublicPlacesSearchQuery = z.infer<typeof publicPlacesSearchQuerySchema>;
+
 // Hanya data yang aman untuk publik. Jumlah pengguna yang menyimpan tempat tidak disertakan.
 export interface PublicPlace {
   id: string;
@@ -51,6 +57,7 @@ export interface PublicPlacesResult {
 
 export interface PublicPlacesReader {
   listInBounds(query: PublicPlacesQuery): Promise<PublicPlacesResult>;
+  search(query: PublicPlacesSearchQuery): Promise<PublicPlace[]>;
 }
 
 const statusRank: Record<AccessibilityStatus, number> = { accessible: 0, partial: 1, unknown: 2 };
@@ -71,6 +78,22 @@ export function createInMemoryPublicPlacesReader(places: PublicPlace[]): PublicP
         .filter((place) => !status || place.accessibilityStatus === status)
         .sort(comparePlaces);
       return { items: matches.slice(0, limit), truncated: matches.length > limit };
+    },
+    async search({ q, limit }) {
+      const lower = q.toLowerCase();
+      const matches = places.filter((p) =>
+        p.name.toLowerCase().includes(lower) ||
+        p.address.toLowerCase().includes(lower) ||
+        p.category.toLowerCase().includes(lower)
+      );
+      matches.sort((a, b) => {
+        const aName = a.name.toLowerCase();
+        const bName = b.name.toLowerCase();
+        const aScore = aName === lower ? 0 : aName.startsWith(lower) ? 1 : 2;
+        const bScore = bName === lower ? 0 : bName.startsWith(lower) ? 1 : 2;
+        return aScore - bScore || comparePlaces(a, b);
+      });
+      return matches.slice(0, limit);
     },
   };
 }
@@ -124,6 +147,48 @@ export function createPrismaPublicPlacesReader(): PublicPlacesReader {
         })),
         truncated: rows.length > limit,
       };
+    },
+    async search({ q, limit }) {
+      const searchTerm = `%${q}%`;
+      const exactTerm = q;
+      const prefixTerm = `${q}%`;
+
+      const rows = await getPrisma().$queryRaw<PublicPlaceRow[]>`
+        SELECT id, name, category, address, latitude, longitude,
+          accessibility_status, accessibility_attributes, data_source,
+          osm_type, osm_id::text AS osm_id, source_updated_at, updated_at
+        FROM public.places
+        WHERE (
+          name ILIKE ${searchTerm}
+          OR address ILIKE ${searchTerm}
+          OR category ILIKE ${searchTerm}
+        )
+        ORDER BY
+          CASE
+            WHEN name ILIKE ${exactTerm} THEN 0
+            WHEN name ILIKE ${prefixTerm} THEN 1
+            WHEN name ILIKE ${searchTerm} THEN 2
+            ELSE 3
+          END,
+          CASE accessibility_status WHEN 'accessible' THEN 0 WHEN 'partial' THEN 1 ELSE 2 END,
+          name ASC, id ASC
+        LIMIT ${limit}::int`;
+
+      return rows.map((row) => ({
+        id: row.id,
+        name: row.name,
+        category: row.category,
+        address: row.address,
+        latitude: row.latitude,
+        longitude: row.longitude,
+        accessibilityStatus: row.accessibility_status,
+        accessibilityAttributes: row.accessibility_attributes ?? {},
+        dataSource: row.data_source,
+        osmType: row.osm_type,
+        osmId: row.osm_id === null ? null : Number(row.osm_id),
+        sourceUpdatedAt: row.source_updated_at ? row.source_updated_at.toISOString() : null,
+        updatedAt: row.updated_at.toISOString(),
+      }));
     },
   };
 }

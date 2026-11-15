@@ -156,9 +156,17 @@ export const jobListQuerySchema = z.strictObject({
   pageSize: z.coerce.number().int().min(1).max(50).default(10),
 });
 
+export interface PlaceStats {
+  total: number;
+  accessible: number;
+  partial: number;
+  unknown: number;
+}
+
 export const placeListQuerySchema = z.strictObject({
   q: z.string().trim().max(100, 'Kata kunci maksimal 100 karakter.').optional(),
   status: z.enum(ACCESSIBILITY_STATUSES, { message: 'Status aksesibilitas tidak dikenal.' }).optional(),
+  category: z.string().trim().max(100).optional(),
   source: z.enum(PLACE_SOURCES, { message: 'Sumber data tidak dikenal.' }).optional(),
   page: z.coerce.number().int().min(1).max(10_000).default(1),
   pageSize: z.coerce.number().int().min(1).max(100, 'Maksimal 100 tempat per halaman.').default(20),
@@ -174,6 +182,23 @@ export const deletePlaceSchema = z.strictObject({
 });
 
 const coordinateMessage = 'Koordinat harus berada di wilayah daratan Jakarta.';
+
+export const createPlaceSchema = z.strictObject({
+  name: z.string().trim().min(1, 'Nama tempat wajib diisi.').max(PLACE_LIMITS.name, 'Nama maksimal 200 karakter.'),
+  category: z.string().trim().min(1, 'Kategori wajib diisi.').max(PLACE_LIMITS.category, 'Kategori maksimal 80 karakter.'),
+  address: z.string().trim().min(1, 'Alamat wajib diisi.').max(PLACE_LIMITS.address, 'Alamat maksimal 300 karakter.'),
+  latitude: z.number().min(JAKARTA_BOUNDS.minLat, coordinateMessage).max(JAKARTA_BOUNDS.maxLat, coordinateMessage).optional().nullable(),
+  longitude: z.number().min(JAKARTA_BOUNDS.minLon, coordinateMessage).max(JAKARTA_BOUNDS.maxLon, coordinateMessage).optional().nullable(),
+  accessibilityStatus: z.enum(ACCESSIBILITY_STATUSES, { message: 'Status aksesibilitas tidak dikenal.' }).default('unknown'),
+  accessibilityAttributes: z.partialRecord(
+    z.enum(ACCESSIBILITY_ATTRIBUTE_KEYS),
+    z.string().trim().max(PLACE_LIMITS.attribute, 'Nilai atribut maksimal 500 karakter.'),
+  ).optional(),
+}).refine((value) => (value.latitude === undefined || value.latitude === null) === (value.longitude === undefined || value.longitude === null), {
+  message: 'Latitude dan longitude harus diisi bersamaan.',
+  path: ['latitude'],
+});
+export type CreatePlaceInput = z.infer<typeof createPlaceSchema>;
 
 export const updatePlaceSchema = z.strictObject({
   name: z.string().trim().min(1, 'Nama tempat wajib diisi.').max(PLACE_LIMITS.name, 'Nama maksimal 200 karakter.').optional(),
@@ -219,6 +244,8 @@ export interface PlaceImportStore {
   failInterruptedJobs(message: string): Promise<number>;
   applyImport(places: MappedPlace[]): Promise<ApplyImportResult>;
   listPlaces(query: PlaceListQuery): Promise<Page<PlaceRecord>>;
+  getStats(source?: PlaceSource): Promise<PlaceStats>;
+  createPlace(input: CreatePlaceInput): Promise<PlaceRecord>;
   findDuplicateCandidates(limit: number): Promise<DuplicateCandidate[]>;
   updatePlace(id: string, patch: UpdatePlaceInput): Promise<PlaceRecord | null>;
   deletePlace(id: string, actorId: string, reason: string): Promise<DeletePlaceResult | null>;
@@ -435,8 +462,10 @@ export function createInMemoryPlaceImportStore(): InMemoryPlaceImportStore {
 
     async listPlaces(query) {
       const keyword = query.q?.toLowerCase();
+      const category = query.category?.toLowerCase();
       const filtered = [...places.values()]
-        .filter((place) => !keyword || place.name.toLowerCase().includes(keyword))
+        .filter((place) => !keyword || place.name.toLowerCase().includes(keyword) || place.address.toLowerCase().includes(keyword))
+        .filter((place) => !category || place.category.toLowerCase() === category)
         .filter((place) => !query.status || place.accessibilityStatus === query.status)
         .filter((place) => !query.source || place.dataSource === query.source)
         .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
@@ -447,6 +476,42 @@ export function createInMemoryPlaceImportStore(): InMemoryPlaceImportStore {
         page: query.page,
         pageSize: query.pageSize,
       };
+    },
+
+    async getStats(source) {
+      const items = [...places.values()].filter((place) => !source || place.dataSource === source);
+      return {
+        total: items.length,
+        accessible: items.filter((p) => p.accessibilityStatus === 'accessible').length,
+        partial: items.filter((p) => p.accessibilityStatus === 'partial').length,
+        unknown: items.filter((p) => p.accessibilityStatus === 'unknown').length,
+      };
+    },
+
+    async createPlace(input) {
+      const timestamp = now();
+      const id = randomUUID();
+      const record = {
+        id,
+        name: input.name,
+        category: input.category,
+        address: input.address,
+        latitude: input.latitude ?? null,
+        longitude: input.longitude ?? null,
+        accessibilityStatus: input.accessibilityStatus,
+        accessibilityAttributes: cleanAttributes(input.accessibilityAttributes ?? {}),
+        dataSource: 'manual' as const,
+        osmType: null,
+        osmId: null,
+        editedByAdmin: true,
+        sourceUpdatedAt: null,
+        lastImportedAt: null,
+        editedAt: timestamp,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      };
+      places.set(id, record);
+      return withUsage(record);
     },
 
     async findDuplicateCandidates(limit) {
@@ -920,21 +985,72 @@ export function createPrismaPlaceImportStore(): PlaceImportStore {
       const db = getPrisma();
       const pattern = query.q ? `%${query.q.replace(/[\\%_]/g, '\\$&')}%` : null;
       const status = query.status ?? null;
+      const category = query.category ?? null;
       const source = query.source ?? null;
       const offset = (query.page - 1) * query.pageSize;
       const rows = await db.$queryRaw<PlaceRow[]>`
         SELECT * FROM public.places
-        WHERE (${pattern}::text IS NULL OR name ILIKE ${pattern}::text)
+        WHERE (${pattern}::text IS NULL OR name ILIKE ${pattern}::text OR address ILIKE ${pattern}::text)
           AND (${status}::text IS NULL OR accessibility_status = ${status}::text)
+          AND (${category}::text IS NULL OR category ILIKE ${category}::text)
           AND (${source}::text IS NULL OR data_source = ${source}::text)
         ORDER BY name ASC, id ASC
         LIMIT ${query.pageSize}::int OFFSET ${offset}::int`;
       const [count] = await db.$queryRaw<{ total: number }[]>`
         SELECT count(*)::int AS total FROM public.places
-        WHERE (${pattern}::text IS NULL OR name ILIKE ${pattern}::text)
+        WHERE (${pattern}::text IS NULL OR name ILIKE ${pattern}::text OR address ILIKE ${pattern}::text)
           AND (${status}::text IS NULL OR accessibility_status = ${status}::text)
+          AND (${category}::text IS NULL OR category ILIKE ${category}::text)
           AND (${source}::text IS NULL OR data_source = ${source}::text)`;
       return { items: await withUsage(rows), total: count?.total ?? 0, page: query.page, pageSize: query.pageSize };
+    },
+
+    async getStats(source) {
+      const db = getPrisma();
+      const rows = await db.$queryRaw<{ accessibility_status: AccessibilityStatus; count: number }[]>`
+        SELECT accessibility_status, count(*)::int AS count
+        FROM public.places
+        WHERE (${source ?? null}::text IS NULL OR data_source = ${source ?? null}::text)
+        GROUP BY accessibility_status`;
+      
+      let accessible = 0;
+      let partial = 0;
+      let unknown = 0;
+      let total = 0;
+      for (const row of rows) {
+        total += row.count;
+        if (row.accessibility_status === 'accessible') accessible = row.count;
+        else if (row.accessibility_status === 'partial') partial = row.count;
+        else if (row.accessibility_status === 'unknown') unknown = row.count;
+      }
+      return { total, accessible, partial, unknown };
+    },
+
+    async createPlace(input) {
+      const db = getPrisma();
+      const attributes = input.accessibilityAttributes ? JSON.stringify(cleanAttributes(input.accessibilityAttributes)) : '{}';
+      const [row] = await db.$queryRaw<PlaceRow[]>`
+        INSERT INTO public.places (
+          name, category, address, latitude, longitude,
+          accessibility_status, accessibility_attributes,
+          data_source, edited_by_admin, edited_at, updated_at
+        ) VALUES (
+          ${input.name},
+          ${input.category},
+          ${input.address},
+          ${input.latitude ?? null}::double precision,
+          ${input.longitude ?? null}::double precision,
+          ${input.accessibilityStatus},
+          ${attributes}::jsonb,
+          'manual',
+          true,
+          now(),
+          now()
+        )
+        RETURNING *`;
+      if (!row) throw new PlaceImportError(500, 'CREATE_PLACE_FAILED', 'Gagal menambahkan lokasi.');
+      const [record] = await withUsage([row]);
+      return record!;
     },
 
     async findDuplicateCandidates(limit) {
