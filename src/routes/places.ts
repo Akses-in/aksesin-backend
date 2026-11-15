@@ -4,6 +4,7 @@ import { PlaceImportError, toPlaceImportError } from '../services/place-import.j
 import {
   createPrismaPublicPlacesReader,
   publicPlacesQuerySchema,
+  publicPlacesSearchQuerySchema,
   type PublicPlacesReader,
 } from '../services/public-places.js';
 
@@ -19,6 +20,26 @@ export function createPlacesRouter(options?: { reader?: PublicPlacesReader }): R
     defaultReader ??= createPrismaPublicPlacesReader();
     return defaultReader;
   };
+
+  // GET /api/places/search?q=query&limit=20
+  // Pencarian publik tempat (Manual dan OSM) berdasarkan nama, alamat, atau kategori
+  router.get('/places/search', async (req, res, next) => {
+    try {
+      const query = publicPlacesSearchQuerySchema.parse(
+        Object.fromEntries(Object.entries(req.query).filter(([, value]) => value !== '')),
+      );
+      const items = await getReader().search(query);
+      res.set('Cache-Control', 'public, max-age=30');
+      res.json({ data: { items } });
+    } catch (error) {
+      const domainError = toPlaceImportError(error);
+      if (!domainError) {
+        next(error);
+        return;
+      }
+      res.status(domainError.status).json({ error: { code: domainError.code, message: domainError.message } });
+    }
+  });
 
   // GET /api/places?bbox=minLon,minLat,maxLon,maxLat&status=&limit=
   // Publik dan selalu membaca database, sehingga peta tetap terisi walau Overpass mati.

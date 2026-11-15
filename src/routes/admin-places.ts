@@ -2,8 +2,10 @@ import express, { Router, type NextFunction, type Request, type Response } from 
 import { env } from '../config/env.js';
 import { supabaseAuthResolver, type AuthenticatedActor, type AuthResolver } from '../lib/auth.js';
 import { createOverpassFetcher, type OverpassFetcher } from '../services/overpass.js';
+import { geocodeAddress } from '../services/geocoding.js';
 import {
   PlaceImportError,
+  createPlaceSchema,
   createPrismaPlaceImportStore,
   deletePlaceSchema,
   jobListQuerySchema,
@@ -114,10 +116,41 @@ export function createAdminPlacesRouter(options?: {
     res.json({ data: job });
   }));
 
+  // GET /api/admin/places/stats: ringkasan status tempat
+  router.get('/admin/places/stats', adminOnly(async (req, res) => {
+    const sourceParam = typeof req.query.source === 'string' ? req.query.source : undefined;
+    const source = sourceParam === 'manual' || sourceParam === 'osm' ? sourceParam : undefined;
+    res.json({ data: await getStore().getStats(source) });
+  }));
+
   // GET /api/admin/places: daftar tempat dan atribut aksesibilitas, dibaca dari database
   router.get('/admin/places', adminOnly(async (req, res) => {
     const query = placeListQuerySchema.parse(withoutEmptyValues(req.query));
     res.json({ data: await getStore().listPlaces(query) });
+  }));
+
+  // POST /api/admin/places: tambah tempat manual baru oleh admin dengan auto-geocoding
+  router.post('/admin/places', adminOnly(async (req, res) => {
+    const input = createPlaceSchema.parse(req.body ?? {});
+
+    // Jika koordinat belum disediakan, lakukan auto-geocoding
+    if (input.latitude === null || input.latitude === undefined || input.longitude === null || input.longitude === undefined) {
+      const geo = await geocodeAddress(input.address, input.name);
+      if (!geo) {
+        res.status(400).json({
+          error: {
+            code: 'GEOCODING_FAILED',
+            message: 'Alamat tidak ditemukan di wilayah DKI Jakarta. Pastikan alamat lengkap dan mencantumkan wilayah/kelurahan Jakarta.',
+          },
+        });
+        return;
+      }
+      input.latitude = geo.latitude;
+      input.longitude = geo.longitude;
+    }
+
+    const place = await getStore().createPlace(input);
+    res.status(201).json({ data: place });
   }));
 
   // GET /api/admin/places/duplicates: nama sama setelah dinormalisasi dan berjarak < 50 m
@@ -129,6 +162,16 @@ export function createAdminPlacesRouter(options?: {
   router.patch('/admin/places/:id', adminOnly(async (req, res) => {
     const { id } = uuidParamSchema.parse(req.params);
     const input = updatePlaceSchema.parse(req.body ?? {});
+
+    // Jika alamat diubah tapi koordinat tidak disertakan, perbarui koordinat via geocoding
+    if (input.address && (input.latitude === undefined || input.longitude === undefined)) {
+      const geo = await geocodeAddress(input.address, input.name);
+      if (geo) {
+        input.latitude = geo.latitude;
+        input.longitude = geo.longitude;
+      }
+    }
+
     const place = await getStore().updatePlace(id, input);
     if (!place) throw new PlaceImportError(404, 'PLACE_NOT_FOUND', 'Tempat tidak ditemukan.');
     res.json({ data: place });

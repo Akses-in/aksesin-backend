@@ -99,10 +99,33 @@ test('PBI-05: skema database belum diterapkan dibalas 503 yang jelas', async () 
           meta: { driverAdapterError: { cause: { originalCode: '42703', kind: 'ColumnNotFound' } } },
         });
       },
+      search: async () => [],
     },
   }));
   app.use(errorHandler);
 
   const response = await request(app).get(`/api/places?bbox=${JAKARTA_CENTER}`).expect(503);
   assert.equal(response.body.error.code, 'IMPORT_SCHEMA_MISSING');
+});
+
+test('Fitur Search: pencarian tempat berdasarkan nama, alamat, dan kategori', async () => {
+  const app = setup([
+    place(1, { name: 'Grand Indonesia', category: 'Pusat Perbelanjaan', address: 'Jl. M.H. Thamrin' }),
+    place(2, { name: 'Plaza Indonesia', category: 'Pusat Perbelanjaan', address: 'Jl. M.H. Thamrin' }),
+    place(3, { name: 'RSUD Tarakan', category: 'Kesehatan', address: 'Jl. Kyai Caringin' }),
+  ]);
+
+  const byName = await request(app).get('/api/places/search?q=Grand').expect(200);
+  assert.equal(byName.body.data.items.length, 1);
+  assert.equal(byName.body.data.items[0].name, 'Grand Indonesia');
+
+  const byCategory = await request(app).get('/api/places/search?q=Perbelanjaan').expect(200);
+  assert.equal(byCategory.body.data.items.length, 2);
+
+  const byStreet = await request(app).get('/api/places/search?q=Caringin').expect(200);
+  assert.equal(byStreet.body.data.items.length, 1);
+  assert.equal(byStreet.body.data.items[0].name, 'RSUD Tarakan');
+
+  const empty = await request(app).get('/api/places/search?q=').expect(400);
+  assert.equal(empty.body.error.code, 'VALIDATION_ERROR');
 });
