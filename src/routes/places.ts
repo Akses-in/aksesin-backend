@@ -1,21 +1,30 @@
-import { Router } from 'express';
-import { env } from '../config/env.js';
-import { PlaceImportError, toPlaceImportError } from '../services/place-import.js';
+import { Router } from "express";
+import { env } from "../config/env.js";
+import {
+  PlaceImportError,
+  toPlaceImportError,
+} from "../services/place-import.js";
 import {
   createPrismaPublicPlacesReader,
   publicPlacesQuerySchema,
   publicPlacesSearchQuerySchema,
   type PublicPlacesReader,
-} from '../services/public-places.js';
+} from "../services/public-places.js";
 
-export function createPlacesRouter(options?: { reader?: PublicPlacesReader }): Router {
+export function createPlacesRouter(options?: {
+  reader?: PublicPlacesReader;
+}): Router {
   const router = Router();
   let defaultReader: PublicPlacesReader | undefined;
 
   const getReader = (): PublicPlacesReader => {
     if (options?.reader) return options.reader;
     if (!env.DATABASE_URL) {
-      throw new PlaceImportError(503, 'DATABASE_UNAVAILABLE', 'Database tempat belum tersedia.');
+      throw new PlaceImportError(
+        503,
+        "DATABASE_UNAVAILABLE",
+        "Database tempat belum tersedia.",
+      );
     }
     defaultReader ??= createPrismaPublicPlacesReader();
     return defaultReader;
@@ -23,13 +32,15 @@ export function createPlacesRouter(options?: { reader?: PublicPlacesReader }): R
 
   // GET /api/places/search?q=query&limit=20
   // Pencarian publik tempat (Manual dan OSM) berdasarkan nama, alamat, atau kategori
-  router.get('/places/search', async (req, res, next) => {
+  router.get("/places/search", async (req, res, next) => {
     try {
       const query = publicPlacesSearchQuerySchema.parse(
-        Object.fromEntries(Object.entries(req.query).filter(([, value]) => value !== '')),
+        Object.fromEntries(
+          Object.entries(req.query).filter(([, value]) => value !== ""),
+        ),
       );
       const items = await getReader().search(query);
-      res.set('Cache-Control', 'public, max-age=30');
+      res.set("Cache-Control", "public, max-age=30");
       res.json({ data: { items } });
     } catch (error) {
       const domainError = toPlaceImportError(error);
@@ -37,19 +48,27 @@ export function createPlacesRouter(options?: { reader?: PublicPlacesReader }): R
         next(error);
         return;
       }
-      res.status(domainError.status).json({ error: { code: domainError.code, message: domainError.message } });
+      res
+        .status(domainError.status)
+        .json({
+          error: { code: domainError.code, message: domainError.message },
+        });
     }
   });
 
+  // SPRINT2 : AI-37
+
   // GET /api/places?bbox=minLon,minLat,maxLon,maxLat&status=&limit=
   // Publik dan selalu membaca database, sehingga peta tetap terisi walau Overpass mati.
-  router.get('/places', async (req, res, next) => {
+  router.get("/places", async (req, res, next) => {
     try {
       const query = publicPlacesQuerySchema.parse(
-        Object.fromEntries(Object.entries(req.query).filter(([, value]) => value !== '')),
+        Object.fromEntries(
+          Object.entries(req.query).filter(([, value]) => value !== ""),
+        ),
       );
       const result = await getReader().listInBounds(query);
-      res.set('Cache-Control', 'public, max-age=60');
+      res.set("Cache-Control", "public, max-age=60");
       res.json({ data: result });
     } catch (error) {
       const domainError = toPlaceImportError(error);
@@ -57,7 +76,11 @@ export function createPlacesRouter(options?: { reader?: PublicPlacesReader }): R
         next(error);
         return;
       }
-      res.status(domainError.status).json({ error: { code: domainError.code, message: domainError.message } });
+      res
+        .status(domainError.status)
+        .json({
+          error: { code: domainError.code, message: domainError.message },
+        });
     }
   });
 
