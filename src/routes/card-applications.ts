@@ -6,14 +6,78 @@ import {
   CardDomainError,
   type CardApplicationStore,
   createCardApplicationSchema,
+  createInMemoryCardStore,
   createPrismaCardStore,
   statusTransitionSchema,
   updateCardApplicationSchema,
 } from '../services/card-application.js';
 
+const devFallbackStore = createInMemoryCardStore();
+
+function createResilientCardStore(): CardApplicationStore {
+  const primary = createPrismaCardStore();
+  if (env.NODE_ENV === 'production') return primary;
+
+  function wrap<Args extends unknown[], Ret>(
+    fn: (...args: Args) => Promise<Ret>,
+    fallbackFn: (...args: Args) => Promise<Ret>,
+  ): (...args: Args) => Promise<Ret> {
+    return async (...args: Args): Promise<Ret> => {
+      try {
+        return await fn(...args);
+      } catch (err) {
+        if (err instanceof CardDomainError) throw err;
+        console.warn('Primary card store failed in dev; falling back for this request:', err instanceof Error ? err.message : 'UnknownError');
+        return fallbackFn(...args);
+      }
+    };
+  }
+
+  return {
+    listByUser: wrap(primary.listByUser.bind(primary), devFallbackStore.listByUser.bind(devFallbackStore)),
+    getById: wrap(primary.getById.bind(primary), devFallbackStore.getById.bind(devFallbackStore)),
+    getDocument: wrap(primary.getDocument.bind(primary), devFallbackStore.getDocument.bind(devFallbackStore)),
+    create: wrap(primary.create.bind(primary), devFallbackStore.create.bind(devFallbackStore)),
+    update: wrap(primary.update.bind(primary), devFallbackStore.update.bind(devFallbackStore)),
+    cancel: wrap(primary.cancel.bind(primary), devFallbackStore.cancel.bind(devFallbackStore)),
+    transitionStatus: wrap(
+      primary.transitionStatus.bind(primary),
+      devFallbackStore.transitionStatus.bind(devFallbackStore),
+    ),
+    listNotifications: wrap(
+      primary.listNotifications.bind(primary),
+      devFallbackStore.listNotifications.bind(devFallbackStore),
+    ),
+    markNotificationRead: wrap(
+      primary.markNotificationRead.bind(primary),
+      devFallbackStore.markNotificationRead.bind(devFallbackStore),
+    ),
+    markAllNotificationsRead: wrap(
+      primary.markAllNotificationsRead.bind(primary),
+      devFallbackStore.markAllNotificationsRead.bind(devFallbackStore),
+    ),
+    renew: wrap(primary.renew.bind(primary), devFallbackStore.renew.bind(devFallbackStore)),
+    listForAdmin: wrap(primary.listForAdmin.bind(primary), devFallbackStore.listForAdmin.bind(devFallbackStore)),
+    getDocumentForAdmin: wrap(
+      primary.getDocumentForAdmin.bind(primary),
+      devFallbackStore.getDocumentForAdmin.bind(devFallbackStore),
+    ),
+    findByQrToken: wrap(primary.findByQrToken.bind(primary), devFallbackStore.findByQrToken.bind(devFallbackStore)),
+  };
+}
+
+export function getSharedCardStore(): CardApplicationStore {
+  if (!env.DATABASE_URL) {
+    if (env.NODE_ENV !== 'production') return devFallbackStore;
+    throw new CardDomainError(503, 'DATABASE_UNAVAILABLE', 'Database pengajuan belum tersedia.');
+  }
+  return createResilientCardStore();
+}
+
 export interface AuthenticatedActor {
   id: string;
   role: 'user' | 'admin';
+  name?: string;
 }
 
 export type AuthResolver = (req: Request) => Promise<AuthenticatedActor | null>;
@@ -44,9 +108,13 @@ async function defaultSupabaseAuthResolver(req: Request): Promise<AuthenticatedA
   }
 
   const isAdmin = user.app_metadata?.role === 'admin';
+  const name = typeof user.user_metadata?.full_name === 'string' && user.user_metadata.full_name.trim()
+    ? user.user_metadata.full_name.trim()
+    : (user.email ?? '');
   return {
     id: user.id,
     role: isAdmin ? 'admin' : 'user',
+    name,
   };
 }
 
@@ -70,10 +138,7 @@ export function createCardApplicationsRouter(options?: {
   const router = Router();
   const getStore = (): CardApplicationStore => {
     if (options?.store) return options.store;
-    if (!env.DATABASE_URL) {
-      throw new CardDomainError(503, 'DATABASE_UNAVAILABLE', 'Database pengajuan belum tersedia.');
-    }
-    return createPrismaCardStore();
+    return getSharedCardStore();
   };
   const resolveAuth: AuthResolver = options?.authResolver ?? defaultSupabaseAuthResolver;
 
@@ -225,7 +290,11 @@ export function createCardApplicationsRouter(options?: {
 
       const { id } = uuidParam.parse(req.params);
       const input = statusTransitionSchema.parse(req.body);
-      const result = await getStore().transitionStatus(actor.id, id, input);
+      const result = await getStore().transitionStatus(
+        { id: actor.id, role: actor.role, name: actor.name?.trim() || 'Admin AksesIn' },
+        id,
+        input,
+      );
       res.json({
         data: result.application,
         notification: result.notification,

@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { env } from '../config/env.js';
 import { getPrisma } from '../lib/prisma.js';
+import { adminCardApplicationsRouter } from './admin-card-applications.js';
 import { adminPlacesRouter } from './admin-places.js';
 import { cardApplicationsRouter } from './card-applications.js';
 import { placesRouter } from './places.js';
@@ -12,6 +13,7 @@ export const router = Router();
 
 router.use('/api/auth/whatsapp', whatsappRouter);
 router.use('/api', cardApplicationsRouter);
+router.use('/api', adminCardApplicationsRouter);
 router.use('/api', userActivitiesRouter);
 router.use('/api', adminPlacesRouter);
 router.use('/api', placesRouter);
